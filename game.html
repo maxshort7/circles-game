@@ -1,0 +1,289 @@
+<html>
+
+<head>
+
+</head>
+<body>
+
+<p>Directions: Click and drag to connect neighboring dots of like colors horizontally and vertically. </p> 
+
+<!--Canvas stuff from chatgpt-->
+<canvas id="c" width="400" height="400"></canvas>
+<div id="points">Points: 0</div>
+
+<script>
+//Script from chatgpt
+const RADIUS = 12;
+const COLORS = ['red','orange','yellow','green','blue','indigo','violet'];
+const SPACING = RADIUS * 4;
+const FALL_TIME_PER_ROW = 500; // ms per row
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const pointsEl = document.getElementById('points');
+
+let points = 0;
+let cols, rows, xOffset, yOffset;
+const circles = []; // circles[row][col] => {x,y,color,row,col, targetY, animStart, animDuration}
+
+function computeGrid(spacing = SPACING){
+  cols = Math.floor((canvas.width - spacing/2) / spacing);
+  rows = Math.floor((canvas.height - spacing/2) / spacing);
+  xOffset = (canvas.width - (cols - 1) * spacing) / 2;
+  yOffset = (canvas.height - (rows - 1) * spacing) / 2;
+}
+
+function makeCircle(row, col){
+  const x = Math.round(xOffset + col * SPACING);
+  const y = Math.round(yOffset + row * SPACING);
+  return { x, y, color: COLORS[Math.floor(Math.random()*COLORS.length)], row, col, targetY: y, animStart: 0, animDuration: 0 };
+}
+
+function buildGrid(){
+  computeGrid();
+  circles.length = 0;
+  for (let r=0;r<rows;r++){
+    const rowArr = [];
+    for (let c=0;c<cols;c++){
+      rowArr.push(makeCircle(r,c));
+    }
+    circles.push(rowArr);
+  }
+}
+
+function drawCircleObj(c, highlight=false){
+  if (!c) return; // don't draw removed placeholder
+  ctx.save();
+  ctx.beginPath();
+  ctx.fillStyle = c.color;
+  ctx.arc(c.x, c.y, RADIUS, 0, Math.PI*2);
+  ctx.fill();
+  if (highlight){
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+function drawLine(x1,y1,x2,y2,color,width=3,alpha=0.95){
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.beginPath();
+  ctx.moveTo(x1,y1);
+  ctx.lineTo(x2,y2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function render(drag, now = performance.now()){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // draw all circles at interpolated y; skip null placeholders
+  for (let r=0;r<rows;r++){
+    for (let c=0;c<cols;c++){
+      const node = circles[r][c];
+      if (!node) continue; // removed cell
+      let drawY = node.y;
+      if (node.animDuration > 0 && node.animStart > 0){
+        const t = Math.min(1, (now - node.animStart) / node.animDuration);
+        drawY = node.y + (node.targetY - node.y) * t;
+      } else {
+        drawY = node.y;
+      }
+      const prevY = node.y;
+      node.y = drawY;
+      drawCircleObj(node, false);
+      node.y = prevY;
+    }
+  }
+
+  if (drag){
+    const color = drag.origin.color;
+    let prev = drag.origin;
+    for (const snap of drag.snappedChain){
+      drawLine(prev.x, prev.y, snap.x, snap.y, color, 4, 0.95);
+      drawCircleObj(prev, true);
+      drawCircleObj(snap, true);
+      prev = snap;
+    }
+    const from = (drag.snappedChain.length ? drag.snappedChain[drag.snappedChain.length-1] : drag.origin);
+    drawLine(from.x, from.y, drag.mouseX, drag.mouseY, color, 3, 0.95);
+    drawCircleObj(from, true);
+  }
+}
+
+function getCanvasPos(evt){
+  const rect = canvas.getBoundingClientRect();
+  return { x: (evt.clientX - rect.left) * (canvas.width / rect.width), y: (evt.clientY - rect.top) * (canvas.height / rect.height) };
+}
+function findCircleAt(x,y){
+  for (let r=0;r<rows;r++){
+    for (let c=0;c<cols;c++){
+      const node = circles[r][c];
+      if (!node) continue;
+      const dx = x - node.x, dy = y - node.y;
+      if (dx*dx + dy*dy <= RADIUS*RADIUS) return node;
+    }
+  }
+  return null;
+}
+function neighborsOf(node){
+  const list = [];
+  const {row, col} = node;
+  if (row > 0) list.push(circles[row-1][col]);
+  if (row < rows-1) list.push(circles[row+1][col]);
+  if (col > 0) list.push(circles[row][col-1]);
+  if (col < cols-1) list.push(circles[row][col+1]);
+  return list;
+}
+
+/* Immediate removal + animated collapse */
+function removeAndAnimate(selectedNodes){
+  if (!selectedNodes.length) return Promise.resolve();
+
+  const removedSet = new Set(selectedNodes.map(n => `${n.row}-${n.col}`));
+  points += selectedNodes.length;
+  pointsEl.textContent = `Points: ${points}`;
+
+  // Immediately remove selected nodes by replacing with null placeholders
+  for (const n of selectedNodes){
+    circles[n.row][n.col] = null;
+  }
+
+  // compute fall distances per remaining cell in each column
+  const fallCounts = Array(cols).fill(0).map(()=>Array(rows).fill(0));
+  for (let c=0;c<cols;c++){
+    let removedBelow = 0;
+    for (let r=rows-1;r>=0;r--){
+      if (!circles[r][c]) { removedBelow++; fallCounts[c][r] = 0; }
+      else { fallCounts[c][r] = removedBelow; }
+    }
+  }
+
+  // set animation params for nodes that will move
+  const now = performance.now();
+  let maxRowsToFall = 0;
+  for (let r=0;r<rows;r++){
+    for (let c=0;c<cols;c++){
+      const node = circles[r][c];
+      if (!node) continue;
+      const fallBy = fallCounts[c][r];
+      if (fallBy > 0){
+        node.targetY = Math.round(yOffset + (r + fallBy) * SPACING);
+        node.animStart = now;
+        node.animDuration = fallBy * FALL_TIME_PER_ROW;
+        if (fallBy > maxRowsToFall) maxRowsToFall = fallBy;
+      } else {
+        node.targetY = node.y;
+        node.animStart = 0;
+        node.animDuration = 0;
+      }
+    }
+  }
+
+  // animation loop then finalize grid and fill new circles at top
+  const totalAnimTime = maxRowsToFall * FALL_TIME_PER_ROW;
+  return new Promise(resolve => {
+    const start = now;
+    function frame(t){
+      render(null, t);
+      if (t - start < totalAnimTime){
+        requestAnimationFrame(frame);
+      } else {
+        // finalize: for each column, collect non-null nodes bottom->top and prepend new ones
+        for (let c=0;c<cols;c++){
+          const colArr = [];
+          for (let r=rows-1;r>=0;r--){
+            if (circles[r][c]) colArr.push(circles[r][c]);
+          }
+          const missing = rows - colArr.length;
+          const newCol = [];
+          for (let r=0;r<missing;r++) newCol.push(makeCircle(r, c));
+          for (let i = colArr.length - 1; i >= 0; i--){
+            const node = colArr[i];
+            const newRow = newCol.length;
+            node.row = newRow;
+            node.col = c;
+            node.x = Math.round(xOffset + c * SPACING);
+            node.y = Math.round(yOffset + newRow * SPACING);
+            node.targetY = node.y;
+            node.animStart = 0;
+            node.animDuration = 0;
+            newCol.push(node);
+          }
+          for (let r=0;r<rows;r++){
+            circles[r][c] = newCol[r];
+            circles[r][c].row = r;
+            circles[r][c].col = c;
+          }
+        }
+        render(null);
+        resolve();
+      }
+    }
+    requestAnimationFrame(frame);
+  });
+}
+
+/* Drag logic */
+let drag = null;
+
+canvas.addEventListener('mousedown', (evt)=>{
+  const pos = getCanvasPos(evt);
+  const hit = findCircleAt(pos.x, pos.y);
+  if (!hit) return;
+  drag = { origin: hit, mouseX: pos.x, mouseY: pos.y, snappedChain: [] };
+  render(drag);
+});
+
+canvas.addEventListener('mousemove', (evt)=>{
+  if (!drag) return;
+  const pos = getCanvasPos(evt);
+  drag.mouseX = pos.x;
+  drag.mouseY = pos.y;
+  const currentOrigin = drag.snappedChain.length ? drag.snappedChain[drag.snappedChain.length-1] : drag.origin;
+  for (const nb of neighborsOf(currentOrigin)){
+    if (!nb) continue;
+    if (nb.color !== currentOrigin.color) continue;
+    if (drag.snappedChain.includes(nb) || (nb.row === drag.origin.row && nb.col === drag.origin.col && drag.snappedChain.length > 0)) continue;
+    const dist = Math.hypot(drag.mouseX - nb.x, drag.mouseY - nb.y);
+    if (dist <= RADIUS + 6){
+      drag.snappedChain.push(nb);
+      break;
+    }
+  }
+  render(drag);
+});
+
+canvas.addEventListener('mouseup', async (evt)=>{
+  if (!drag) return;
+  const selected = [drag.origin, ...drag.snappedChain];
+  const unique = [];
+  const seen = new Set();
+  for (const n of selected){
+    const k = `${n.row}-${n.col}`;
+    if (!seen.has(k)){ unique.push(n); seen.add(k); }
+  }
+  if (unique.length > 1){
+    await removeAndAnimate(unique);
+  }
+  drag = null;
+  render(null);
+});
+
+canvas.addEventListener('mouseleave', ()=>{
+  if (drag){ drag = null; render(null); }
+});
+canvas.addEventListener('dragstart', e=>e.preventDefault());
+
+/* Init */
+buildGrid();
+render(null);
+pointsEl.textContent = `Points: ${points}`;
+</script>
+
+
+</body>
+</html>
